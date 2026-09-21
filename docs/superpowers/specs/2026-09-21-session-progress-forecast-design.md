@@ -119,7 +119,7 @@ Independent contract tests will cover:
 
 ## Verification Plan
 
-Run from `/Users/liyi/Workspace/pi-otty-todos` on macOS with Node 20 or later: `npm test`, which resolves to the inspected `node --test extensions/tests/*.test.mjs` runner. The test suite must pass all existing and new contract tests. Run `npm pack --dry-run` to verify the manifest still ships the renderer and its core import, then run `pi -e /Users/liyi/Workspace/pi-otty-todos --print 'Reply only: package loaded.'` from a temporary directory to verify Pi loads the package.
+Run from `/Users/liyi/Workspace/pi-otty-todos` on macOS with Node 20 or later: `npm test`, which resolves to the inspected `node --test extensions/tests/*.test.mjs` runner. The test suite must pass all existing and new contract tests. Run `npm pack --dry-run` to verify the manifest still ships the renderer and its core import. The Pi smoke requires Pi 0.86.1, a configured noninteractive model provider, and its required network availability; it must not record credentials. Run `tmpdir=$(mktemp -d); out=$(mktemp); err=$(mktemp); (cd "$tmpdir" && pi -e /Users/liyi/Workspace/pi-otty-todos --print 'Reply only: OK' >"$out" 2>"$err"); status=$?; ! grep -Eqi '(extension.*(error|failed)|((error|failed).*extension))' "$err"; clean=$?; rm -rf "$tmpdir"; rm -f "$out" "$err"; test "$status" -eq 0 && test "$clean" -eq 0`. The deterministic package-load proof is exit 0 with no extension-load error in Pi diagnostics; model text is not asserted.
 
 ## Open Decisions
 
@@ -127,9 +127,9 @@ None.
 
 ## Implementation Plan
 
-Plan revision: 2
+Plan revision: 3
 Base commit: 6de20574a65897df7ffd19a757394980a4ae9a93
-Requirements SHA256: b37492077117f62edf0ba9ce44504c34a615c50852690571a4d865042e98f9cf
+Requirements SHA256: 840d6c38563f8797e707cb45de1a918227844465eccc0ca8124e90991fd1161a
 Readiness: READY
 
 ### Identity
@@ -165,7 +165,7 @@ Readiness: READY
 - [ ] S-2: In `extensions/otty-todos-view.mjs`, replace its v1-only snapshot validator with `parseTodoSnapshot` results and use `deriveSessionMetrics` in `renderSnapshot(snapshot, options)`. Change `activeOttySession` to return session ID plus agent state; render exactly the D-5 header/freshness labels, forecast sections, task-only malformed-timing frame, and v1/no-todos fallbacks. Preserve active-session selection and terminal safety. Prerequisite: S-1. Finish when every D-5/D-6 renderer state produces a terminal-safe deterministic frame.
 - [ ] S-3: In `extensions/tests/otty-todos.test.mjs`, replace the hard-coded global renderer spawn path with a URL/path derived from this test file's `import.meta.url`, so the child process runs the repository renderer. Add fixtures/assertions for envelope rejection versus timing-only degradation, all timing transitions, Pi `SessionEntry.timestamp` replay, rollback, median/threshold/confidence/current-task/queue rules, exact D-5 header/freshness states, v1 fallback, and live v2 refresh. Do not reduce existing assertions. Prerequisites: S-1 and S-2 interfaces are finalized. Finish when `npm test` proves AC-1 through AC-6.
 - [ ] S-4: Update `README.md` feature and behavior documentation for forecast semantics, privacy scope, estimate caveats, sample threshold, and the unchanged Otty installation command. Prerequisite: S-2. Finish when documented behavior matches D-7 and no instruction requires new configuration.
-- [ ] S-5: On macOS with the installed Pi 0.86.1 binary available, run from repository root `npm test` and `npm pack --dry-run`; then run `tmpdir=$(mktemp -d); (cd "$tmpdir" && pi -e /Users/liyi/Workspace/pi-otty-todos --print 'Reply only: package loaded.'); status=$?; rm -rf "$tmpdir"; exit $status`. Expected result is exit 0, package contents include all extensions, and smoke output is exactly `package loaded.`. Obtain an independent test-agent report and a separate read-only implementation review against the final commit before opening the pull request. Prerequisites: S-1 through S-4. Finish when all commands exit 0 and both reports find no unresolved issue.
+- [ ] S-5: On macOS with Pi 0.86.1, a configured noninteractive provider, and required network available, run from repository root `npm test` and `npm pack --dry-run`; then run the exact diagnostic-capture smoke command in Verification Plan. Expected result is exit 0, package contents include all extensions, and captured stderr has no extension-load error; model stdout is not asserted. Obtain an independent test-agent report and a separate read-only implementation review against the final commit before opening the pull request. Prerequisites: S-1 through S-4. Finish when all commands exit 0 and both reports find no unresolved issue.
 
 ### Acceptance-to-Verification Mapping
 
@@ -187,7 +187,7 @@ None. Pi 0.86.1 supplies `entry.timestamp` on every `SessionEntry`; no alternate
 - A separate test subagent owns new and updated test coverage and reports final command output; production implementation does not weaken test assertions.
 - A separate read-only reviewer subagent with `read`, `grep`, `find`, `ls`, and `bash` capacity reviews the final commit and must report no unresolved implementation issue before PR creation.
 - Required final-commit commands are the three checks in the Verification Plan, all from a clean repository root.
-- Repository evidence on 2026-09-21: `.github/` has no workflow files and GitHub returns `404 Branch not protected` for `ijse/pi-otty-todos` `main`; therefore no additional CI, deployment, or branch-protection gate exists beyond the named commands and reviews.
+- Authenticated repository evidence on 2026-09-21: `gh api repos/ijse/pi-otty-todos/branches/main/protection` returns `404 Branch not protected`, and `.github/` has no workflow files; therefore no additional CI, deployment, or branch-protection gate exists beyond the named commands and reviews.
 - Open one pull request from `feat/session-progress-forecast` to `main`; merge only after the tests and both independent reports are successful.
 
 ### Readiness
