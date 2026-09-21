@@ -2,7 +2,7 @@
 
 ## Purpose
 
-Extend `pi-otty-todos` so Otty's sidebar shows the active Pi session's current task, overall progress, and explainable forecasts for the current task and the full todo plan. Forecasts are estimates derived solely from Pi `todo` state transitions; the package will not inspect prompts, tool inputs, command output, or project files.
+Extend `pi-task-progress` so Otty's sidebar shows the active Pi session's current task, overall progress, and explainable forecasts for the current task and the full todo plan. Forecasts are estimates derived solely from Pi `todo` state transitions; the package will not inspect prompts, tool inputs, command output, or project files.
 
 ## Chosen approach
 
@@ -134,7 +134,7 @@ Readiness: READY
 
 ### Identity
 
-- Repository: `ijse/pi-otty-todos`
+- Repository: `ijse/pi-task-progress`
 - Prepared: 2026-09-21 against clean branch `feat/session-progress-forecast`; the base commit is the approved-spec revision above.
 - Manual freshness validation: at clean target `28251cf9ed78cc81726fbdff90ba17e11ebbd7a9`, `git diff --quiet 6de20574a65897df7ffd19a757394980a4ae9a93..28251cf9ed78cc81726fbdff90ba17e11ebbd7a9 -- extensions package.json README.md` succeeded. The only intervening files are this canonical specification/plan document; all implementation paths are byte-identical to the base. Before execution, repeat that comparison from the target checkout and block implementation if it differs.
 - Supersedes: Plan revisions 1–3 in this document.
@@ -188,7 +188,7 @@ None. Pi 0.86.1 supplies `entry.timestamp` on every `SessionEntry`; no alternate
 - A separate test subagent owns new and updated test coverage and reports final command output; production implementation does not weaken test assertions.
 - A separate read-only reviewer subagent with `read`, `grep`, `find`, `ls`, and `bash` capacity reviews the final commit and must report no unresolved implementation issue before PR creation.
 - Required final-commit commands are the three checks in the Verification Plan, all from a clean repository root.
-- Authenticated repository evidence on 2026-09-21: `gh api repos/ijse/pi-otty-todos/branches/main/protection` returns `404 Branch not protected`, and `.github/` has no workflow files; therefore no additional CI, deployment, or branch-protection gate exists beyond the named commands and reviews.
+- Authenticated repository evidence on 2026-09-21: `gh api repos/ijse/pi-task-progress/branches/main/protection` returns `404 Branch not protected`, and `.github/` has no workflow files; therefore no additional CI, deployment, or branch-protection gate exists beyond the named commands and reviews.
 - Open one pull request from `feat/session-progress-forecast` to `main`; merge only after the tests and both independent reports are successful.
 
 ### Readiness

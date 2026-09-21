@@ -1,4 +1,4 @@
-# pi-otty-todos
+# pi-task-progress
 
 A [Pi](https://pi.dev) package that mirrors the active Pi session's todos into a live [Otty](https://otty.sh) sidebar view.
 
@@ -8,13 +8,14 @@ A [Pi](https://pi.dev) package that mirrors the active Pi session's todos into a
 - Keeps snapshots isolated by Pi session and restores them on session start or tree navigation.
 - Uses Otty's running pane metadata to prefer the active Pi session over newer snapshots from unrelated sessions.
 - Renders a live sidebar with progress, in-progress, blocked, pending, and completed tasks.
+- Estimates the active task and whole-plan completion time after at least three completed task-duration samples, with explicit confidence labels.
 
 The extension is Pi-only and targets macOS installations of Otty.
 
 ## Install
 
 ```sh
-pi install git:github.com/ijse/pi-otty-todos
+pi install git:github.com/ijse/pi-task-progress
 ```
 
 Restart Pi or run `/reload` after installation.
@@ -26,12 +27,16 @@ Create an Otty **Terminal Program** View with:
 | Field | Value |
 | --- | --- |
 | Name | `Pi Todos Live` |
-| Command | `/usr/local/bin/node /Users/YOU/.pi/agent/git/github.com/ijse/pi-otty-todos/extensions/otty-todos-view.mjs --instance=1` |
+| Command | `/usr/local/bin/node /Users/YOU/.pi/agent/git/github.com/ijse/pi-task-progress/extensions/otty-todos-view.mjs --instance=1` |
 | Folder | `${cwd}` |
 
 Replace `YOU` with your macOS username. The instance token is intentional: Otty shares terminal-view processes with the same command and working directory, so increment it after changing the renderer command to force a fresh process.
 
 The view refreshes every 750 ms. It reads snapshots only; task edits remain in Pi.
+
+## Forecasts
+
+Forecasts are local, per-session estimates—not execution telemetry. The package records only `todo` status transitions: it observes when a task becomes in progress or completed, then uses the median duration of at least three completed tasks to estimate the running task and remaining plan. The sidebar labels every estimate and reports low, medium, or high confidence from the available sample count. Blocked work remains in the plan estimate, so external waiting is not predicted. If timing is incomplete, stale, or has fewer than three samples, the sidebar keeps the todo list visible and shows that it is collecting samples instead of inventing an ETA.
 
 ## Security and storage
 

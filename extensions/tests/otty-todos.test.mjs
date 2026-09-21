@@ -4,6 +4,20 @@
 // inferred from an implementation):
 //
 //   ../otty-todos-core.mjs
+//     export function parseTodoSnapshot(value): object | null
+//       Returns null for an invalid envelope/task list. For a valid v2 envelope
+//       with an invalid taskTiming value, returns that snapshot with taskTiming:
+//       {}. Valid v1 snapshots remain readable.
+//     export async function readSessionTiming(cwd, sessionId): Promise<object>
+//       Restores only an exact same-session valid-v2 timing map, or {}.
+//     export function deriveSessionMetrics(snapshot): {
+//       visibleTotal, completedTotal, progressPercent, sampleCount,
+//       medianDurationMs, confidence, currentTask, currentTaskRemainingMs,
+//       currentTaskProgressPercent, planRemainingMs, planCompletionAt,
+//       nextTasks, blockedTask, forecastAvailable
+//     }
+//       Forecast fields are null and forecastAvailable is false when timing is
+//       invalid or fewer than three usable duration samples exist.
 //     export function createTodoPublisher(options?): {
 //       handleToolResult(event, ctx): void | Promise<void>,
 //       publishCurrentState(ctx): void | Promise<void>,
@@ -18,7 +32,7 @@
 //     export async function selectSnapshot(projectPath, options?): Promise<object|null>
 //     When `options.activeSessionId` identifies a valid snapshot, that snapshot
 //     takes precedence over the normal newest-valid selection.
-//     export function renderSnapshot(snapshot): string
+//     export function renderSnapshot(snapshot, options?): string
 //     The returned frame includes the renderer-owned ANSI home/erase redraw
 //     controls.  The executable module may additionally refresh forever when
 //     run as a program; importing it must not start a timer.
@@ -33,11 +47,12 @@ import { once } from "node:events";
 import { chmod, lstat, mkdir, mkdtemp, readFile, readdir, realpath, rm, symlink, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import test from "node:test";
 
-const ROOT = "/Users/liyi/.pi/agent/extensions";
 const CORE_URL = new URL("../otty-todos-core.mjs", import.meta.url).href;
 const VIEW_URL = new URL("../otty-todos-view.mjs", import.meta.url).href;
+const VIEW_PATH = fileURLToPath(new URL("../otty-todos-view.mjs", import.meta.url));
 
 async function core() {
   return import(CORE_URL);
@@ -99,12 +114,18 @@ async function snapshot(cwd, session) {
   return JSON.parse(await readFile(snapshotPath(cwd, session), "utf8"));
 }
 
-function branchEntry(result) {
-  return { type: "message", message: { role: "toolResult", ...result } };
+function branchEntry(result, timestamp) {
+  const entry = { type: "message", message: { role: "toolResult", ...result } };
+  if (timestamp !== undefined) entry.timestamp = timestamp;
+  return entry;
 }
 
 function v1Snapshot(sessionId, updatedAt, tasks, cwd, extras = {}) {
   return { version: 1, sessionId, cwd, updatedAt, tasks, ...extras };
+}
+
+function v2Snapshot(sessionId, updatedAt, observedAt, tasks, cwd, taskTiming = {}, extras = {}) {
+  return { version: 2, sessionId, cwd, updatedAt, observedAt, tasks, taskTiming, ...extras };
 }
 
 async function writeCandidate(cwd, name, value, mtimeMs = 1000) {
@@ -163,11 +184,12 @@ function waitForOutput(child, output, expected, timeoutMs = 5000) {
   });
 }
 
-test("valid installed-harness TaskDetails produces the exact session-specific v1 snapshot", async (t) => {
+test("valid installed-harness TaskDetails produces the exact session-specific v2 snapshot", async (t) => {
   const { createTodoPublisher } = await core();
   assert.equal(typeof createTodoPublisher, "function");
   const cwd = await project(t);
-  const publisher = createTodoPublisher({ now: () => 123456789 });
+  let clockCalls = 0;
+  const publisher = createTodoPublisher({ now: () => { clockCalls += 1; return 123456789; } });
   const result = publisher.handleToolResult(todoResult([
     task(1, "first", { description: "details", status: "in_progress", blockedBy: [9] }),
     task(2, "done", { status: "completed" }),
@@ -180,16 +202,19 @@ test("valid installed-harness TaskDetails produces the exact session-specific v1
   void result;
   await settle(publisher);
   assert.deepEqual(await snapshot(cwd), {
-    version: 1,
+    version: 2,
     sessionId: "session-a",
     cwd: await realpath(cwd),
     updatedAt: 123456789,
+    observedAt: 123456789,
     tasks: [
       { id: 1, subject: "first", description: "details", status: "in_progress", blockedBy: [9] },
       { id: 2, subject: "done", status: "completed" },
       { id: 3, subject: "gone", status: "deleted" },
     ],
+    taskTiming: { 1: { startedAt: 123456789 }, 2: { completedAt: 123456789 } },
   });
+  assert.equal(clockCalls, 1, "one live todo result must capture its observation time exactly once");
 });
 
 test("only a complete, error-free installed TaskDetails envelope is accepted", async (t) => {
@@ -407,7 +432,7 @@ test("standalone renderer refreshes its frame after a snapshot revision", { time
     task(1, initialSubject, { status: "pending" }),
   ], cwd));
 
-  const child = spawn(process.execPath, [join(ROOT, "otty-todos-view.mjs"), "--instance=contract-test", cwd], {
+  const child = spawn(process.execPath, [VIEW_PATH, "--instance=contract-test", cwd], {
     stdio: ["ignore", "pipe", "pipe"],
   });
   let stdout = "";
@@ -461,4 +486,450 @@ test("renderer groups visible tasks, excludes deleted tasks, and sanitizes termi
   assert.ok(pos("blocked") < pos("unblocked-by-completed"));
   assert.ok(pos("unblocked-by-completed") < pos("done"));
   assert.ok(pos("unblocked-by-completed") < pos("open"), "unblocked group is sorted numerically by id");
+});
+
+test("v2 parser rejects malformed envelopes and degrades malformed timing without hiding todos", async () => {
+  const { parseTodoSnapshot } = await core();
+  assert.equal(typeof parseTodoSnapshot, "function");
+
+  const valid = v2Snapshot("v2-session", 100, 100, [
+    task(1, "finished", { status: "completed" }),
+    task(2, "running", { status: "in_progress" }),
+  ], "/canonical/project", {
+    1: { startedAt: 10, completedAt: 100 },
+    2: { startedAt: 90 },
+  });
+  assert.deepEqual(parseTodoSnapshot(valid), valid);
+  assert.deepEqual(parseTodoSnapshot(v1Snapshot("legacy", 10, [task(1)], "/canonical/project")),
+    v1Snapshot("legacy", 10, [task(1)], "/canonical/project"));
+
+  const invalidEnvelopes = [
+    { ...valid, extra: true },
+    (() => { const { taskTiming, ...withoutTiming } = valid; return withoutTiming; })(),
+    { ...valid, version: 3 },
+    { ...valid, sessionId: "" },
+    { ...valid, cwd: "" },
+    { ...valid, updatedAt: 1.5 },
+    { ...valid, observedAt: -1 },
+    { ...valid, observedAt: 1.5 },
+    { ...valid, tasks: {} },
+    { ...valid, tasks: [task(1, "wrong", { status: "unknown" })] },
+  ];
+  for (const candidate of invalidEnvelopes) {
+    assert.equal(parseTodoSnapshot(candidate), null, `invalid envelope must be rejected: ${JSON.stringify(candidate)}`);
+  }
+
+  const malformedTiming = [
+    { 99: { startedAt: 1 } },
+    { 1: {} },
+    { nope: { startedAt: 1 } },
+    { 1: { startedAt: -1 } },
+    { 1: { startedAt: 1.5 } },
+    { 1: { startedAt: 100, completedAt: 99 } },
+    { 1: { startedAt: 1, completedAt: 2, extra: true } },
+  ];
+  for (const taskTiming of malformedTiming) {
+    assert.deepEqual(parseTodoSnapshot({ ...valid, taskTiming }), { ...valid, taskTiming: {} },
+      `malformed timing must degrade to the task-only v2 state: ${JSON.stringify(taskTiming)}`);
+  }
+});
+
+test("readSessionTiming restores only an exact same-project v2 timing map", async (t) => {
+  const { readSessionTiming } = await core();
+  assert.equal(typeof readSessionTiming, "function");
+  const cwd = await project(t);
+  const canonicalCwd = await realpath(cwd);
+  const timing = { 1: { startedAt: 10, completedAt: 20 } };
+
+  await writeCandidate(cwd, "session-a.json", v2Snapshot("session-a", 20, 20, [
+    task(1, "done", { status: "completed" }),
+  ], canonicalCwd, timing));
+  assert.deepEqual(await readSessionTiming(cwd, "session-a"), timing);
+
+  await writeCandidate(cwd, "session-a.json", v2Snapshot("another-session", 20, 20, [
+    task(1, "done", { status: "completed" }),
+  ], canonicalCwd, timing));
+  assert.deepEqual(await readSessionTiming(cwd, "session-a"), {}, "a filename is not a session identity");
+
+  await writeCandidate(cwd, "session-a.json", v2Snapshot("session-a", 20, 20, [
+    task(1, "done", { status: "completed" }),
+  ], "/different/project", timing));
+  assert.deepEqual(await readSessionTiming(cwd, "session-a"), {}, "a foreign cwd snapshot must not seed this project");
+
+  await writeCandidate(cwd, "session-a.json", v2Snapshot("session-a", 20, 20, [
+    task(1, "done", { status: "completed" }),
+  ], canonicalCwd, { 1: { startedAt: 30, completedAt: 20 } }));
+  assert.deepEqual(await readSessionTiming(cwd, "session-a"), {}, "bad timing is never partially restored");
+});
+
+test("live publisher reconciles start, completion, reopening, pause, deletion, disappearance, and hot reload timing", async (t) => {
+  const { createTodoPublisher } = await core();
+  const cwd = await project(t);
+  let now = 10;
+  const publisher = createTodoPublisher({ now: () => now });
+  const ctx = context(cwd);
+  const publish = async (tasks) => {
+    publisher.handleToolResult(todoResult(tasks), ctx);
+    await settle(publisher);
+    return snapshot(cwd);
+  };
+
+  assert.deepEqual((await publish([task(1, "work", { status: "in_progress" })])).taskTiming,
+    { 1: { startedAt: 10 } });
+  now = 20;
+  assert.deepEqual((await publish([task(1, "work", { status: "completed" })])).taskTiming,
+    { 1: { startedAt: 10, completedAt: 20 } });
+  now = 30;
+  assert.deepEqual((await publish([task(1, "work", { status: "in_progress" })])).taskTiming,
+    { 1: { startedAt: 10 } }, "reopening keeps only an in-progress start");
+  now = 40;
+  assert.deepEqual((await publish([task(1, "work", { status: "pending" })])).taskTiming, {},
+    "pausing an in-progress task drops its stale timing");
+  now = 50;
+  assert.deepEqual((await publish([task(1, "work", { status: "in_progress" })])).taskTiming,
+    { 1: { startedAt: 50 } }, "a restart gets a new start time");
+  now = 60;
+  assert.deepEqual((await publish([task(1, "work", { status: "deleted" })])).taskTiming, {},
+    "deletion removes timing");
+  now = 70;
+  await publish([task(2, "disappears", { status: "in_progress" })]);
+  now = 80;
+  assert.deepEqual((await publish([])).taskTiming, {}, "a disappeared task removes timing");
+
+  const restoredCwd = await project(t);
+  const canonicalRestoredCwd = await realpath(restoredCwd);
+  await writeCandidate(restoredCwd, "session-a.json", v2Snapshot("session-a", 5, 5, [
+    task(3, "restored", { status: "in_progress" }),
+  ], canonicalRestoredCwd, { 3: { startedAt: 5 } }));
+  const reloaded = createTodoPublisher({ now: () => 100 });
+  reloaded.handleToolResult(todoResult([task(3, "restored", { status: "in_progress" })]), context(restoredCwd));
+  await settle(reloaded);
+  assert.deepEqual((await snapshot(restoredCwd)).taskTiming, { 3: { startedAt: 5 } },
+    "a publisher hot reload restores valid selected-session timing before live reconciliation");
+});
+
+test("clock rollback clears affected timing without discarding the live todo state", async (t) => {
+  const { createTodoPublisher } = await core();
+  const cwd = await project(t);
+  let now = 100;
+  const publisher = createTodoPublisher({ now: () => now });
+  const ctx = context(cwd);
+  publisher.handleToolResult(todoResult([task(1, "rollback", { status: "in_progress" })]), ctx);
+  await settle(publisher);
+
+  now = 90;
+  publisher.handleToolResult(todoResult([task(1, "rollback", { status: "completed" })]), ctx);
+  await settle(publisher);
+  const rolledBack = await snapshot(cwd);
+  assert.deepEqual(rolledBack.tasks, [task(1, "rollback", { status: "completed" })]);
+  assert.deepEqual(rolledBack.taskTiming, {});
+  assert.equal(rolledBack.observedAt, 90);
+
+  now = 110;
+  publisher.handleToolResult(todoResult([task(1, "rollback", { status: "in_progress" })]), ctx);
+  await settle(publisher);
+  assert.deepEqual((await snapshot(cwd)).taskTiming, { 1: { startedAt: 110 } },
+    "a later live observation starts fresh instead of retaining a negative interval");
+});
+
+test("branch replay uses only valid entry timestamps and never the live clock", async (t) => {
+  const { createTodoPublisher } = await core();
+  const cwd = await project(t);
+  const publisher = createTodoPublisher({
+    now: () => { throw new Error("branch replay must not call now()"); },
+  });
+  publisher.publishCurrentState(context(cwd, {
+    branch: [
+      branchEntry(todoResult([task(1, "replayed", { status: "in_progress" })]), "1970-01-01T00:00:01.000Z"),
+      branchEntry(todoResult([task(1, "replayed", { status: "completed" })]), "1970-01-01T00:00:04.000Z"),
+    ],
+  }));
+  await settle(publisher);
+  const replayed = await snapshot(cwd);
+  assert.equal(replayed.observedAt, 4000);
+  assert.deepEqual(replayed.taskTiming, { 1: { startedAt: 1000, completedAt: 4000 } });
+});
+
+test("missing, invalid, pre-epoch, and backward replay timestamps withhold timing until a later live transition", async (t) => {
+  const { createTodoPublisher } = await core();
+  const cwd = await project(t);
+  let replaying = true;
+  let now = 6000;
+  const publisher = createTodoPublisher({
+    now: () => {
+      if (replaying) throw new Error("branch replay must not call now()");
+      return now;
+    },
+  });
+  const completed = (id, subject) => task(id, subject, { status: "completed" });
+  publisher.publishCurrentState(context(cwd, {
+    branch: [
+      branchEntry(todoResult([task(1, "missing", { status: "in_progress" })]), "1970-01-01T00:00:01.000Z"),
+      branchEntry(todoResult([completed(1, "missing"), task(2, "invalid", { status: "in_progress" })])),
+      branchEntry(todoResult([completed(1, "missing"), completed(2, "invalid"), task(3, "pre-epoch", { status: "in_progress" })]), "not-a-timestamp"),
+      branchEntry(todoResult([completed(1, "missing"), completed(2, "invalid"), completed(3, "pre-epoch"), task(4, "backward", { status: "in_progress" })]), "1969-12-31T23:59:59.000Z"),
+      branchEntry(todoResult([completed(1, "missing"), completed(2, "invalid"), completed(3, "pre-epoch"), completed(4, "backward"), task(5, "backward", { status: "in_progress" })]), "1970-01-01T00:00:05.000Z"),
+      branchEntry(todoResult([completed(1, "missing"), completed(2, "invalid"), completed(3, "pre-epoch"), completed(4, "backward"), completed(5, "backward")]), "1970-01-01T00:00:04.000Z"),
+    ],
+  }));
+  await settle(publisher);
+  assert.deepEqual((await snapshot(cwd)).taskTiming, {},
+    "no timing sample may be fabricated from missing, unparsable, negative, or backward history");
+
+  replaying = false;
+  publisher.handleToolResult(todoResult([task(1, "missing", { status: "in_progress" })]), context(cwd));
+  await settle(publisher);
+  assert.deepEqual((await snapshot(cwd)).taskTiming, { 1: { startedAt: 6000 } });
+  now = 7000;
+  publisher.handleToolResult(todoResult([task(1, "missing", { status: "completed" })]), context(cwd));
+  await settle(publisher);
+  assert.deepEqual((await snapshot(cwd)).taskTiming, { 1: { startedAt: 6000, completedAt: 7000 } });
+});
+
+function forecastFixture({ observedAt = 600000, taskTiming, tasks } = {}) {
+  const defaultTasks = [
+    task(1, "one", { status: "completed" }),
+    task(2, "two", { status: "completed" }),
+    task(3, "three", { status: "completed" }),
+    task(4, "active", { status: "in_progress" }),
+    task(5, "next", { status: "pending", blockedBy: [1] }),
+    task(10, "also running", { status: "in_progress" }),
+  ];
+  const defaultTiming = {
+    1: { startedAt: 0, completedAt: 60000 },
+    2: { startedAt: 0, completedAt: 180000 },
+    3: { startedAt: 0, completedAt: 300000 },
+    4: { startedAt: 480000 },
+    10: { startedAt: 500000 },
+  };
+  return v2Snapshot("metrics", observedAt, observedAt, tasks ?? defaultTasks, "/project", taskTiming ?? defaultTiming);
+}
+
+function completedSampleSnapshot(count, observedAt = 100000) {
+  const tasks = [];
+  const taskTiming = {};
+  for (let id = 1; id <= count; id += 1) {
+    tasks.push(task(id, `sample ${id}`, { status: "completed" }));
+    taskTiming[id] = { startedAt: 0, completedAt: id * 1000 };
+  }
+  return v2Snapshot("samples", observedAt, observedAt, tasks, "/project", taskTiming);
+}
+
+test("derived metrics use the visible median, three-sample threshold, all running work, and confidence bands", async () => {
+  const { deriveSessionMetrics } = await core();
+  assert.equal(typeof deriveSessionMetrics, "function");
+  const metrics = deriveSessionMetrics(forecastFixture());
+  assert.equal(metrics.visibleTotal, 6);
+  assert.equal(metrics.completedTotal, 3);
+  assert.equal(metrics.progressPercent, 50);
+  assert.equal(metrics.sampleCount, 3);
+  assert.equal(metrics.medianDurationMs, 180000);
+  assert.equal(metrics.confidence, "low");
+  assert.equal(metrics.forecastAvailable, true);
+  assert.equal(metrics.currentTask.id, 4, "the lowest numeric in-progress ID is highlighted");
+  assert.equal(metrics.currentTaskRemainingMs, 60000);
+  assert.equal(metrics.planRemainingMs, 420000,
+    "the other running task and the pending task count as planned work");
+  assert.equal(metrics.planCompletionAt, 1020000);
+  assert.deepEqual(metrics.nextTasks.map((item) => item.id), [5]);
+  assert.equal(metrics.blockedTask, null);
+
+  const threshold = deriveSessionMetrics(completedSampleSnapshot(2));
+  assert.equal(threshold.sampleCount, 2);
+  assert.equal(threshold.forecastAvailable, false);
+  assert.equal(threshold.medianDurationMs, null);
+  assert.equal(threshold.planRemainingMs, null);
+  assert.equal(threshold.planCompletionAt, null);
+
+  for (const [count, confidence] of [[3, "low"], [4, "low"], [5, "medium"], [9, "medium"], [10, "high"]]) {
+    const sampleMetrics = deriveSessionMetrics(completedSampleSnapshot(count));
+    assert.equal(sampleMetrics.confidence, confidence, `${count} samples has ${confidence} confidence`);
+    assert.equal(sampleMetrics.forecastAvailable, true);
+  }
+});
+
+test("derived metrics cap current progress, keep missing current timing explicit, and return a deterministic next-task queue", async () => {
+  const { deriveSessionMetrics } = await core();
+  const elapsed = deriveSessionMetrics(forecastFixture({ observedAt: 1000000, taskTiming: {
+    1: { startedAt: 0, completedAt: 60000 },
+    2: { startedAt: 0, completedAt: 180000 },
+    3: { startedAt: 0, completedAt: 300000 },
+    4: { startedAt: 0 },
+  } }));
+  assert.equal(elapsed.currentTaskRemainingMs, 0);
+  assert.equal(elapsed.currentTaskProgressPercent, 95, "an in-progress card never visually reaches 100%");
+
+  const missingStart = deriveSessionMetrics(forecastFixture({ taskTiming: {
+    1: { startedAt: 0, completedAt: 60000 },
+    2: { startedAt: 0, completedAt: 180000 },
+    3: { startedAt: 0, completedAt: 300000 },
+  } }));
+  assert.equal(missingStart.forecastAvailable, true);
+  assert.equal(missingStart.currentTask.id, 4);
+  assert.equal(missingStart.currentTaskRemainingMs, 180000);
+  assert.equal(missingStart.currentTaskProgressPercent, null);
+
+  const queued = deriveSessionMetrics(forecastFixture({ tasks: [
+    task(1, "done", { status: "completed" }),
+    task(2, "done", { status: "completed" }),
+    task(3, "done", { status: "completed" }),
+    task(20, "later", { status: "pending", blockedBy: [1] }),
+    task(8, "first", { status: "pending", blockedBy: [2] }),
+    task(30, "third", { status: "pending", blockedBy: [3] }),
+  ], taskTiming: {
+    1: { startedAt: 0, completedAt: 60000 },
+    2: { startedAt: 0, completedAt: 180000 },
+    3: { startedAt: 0, completedAt: 300000 },
+  } }));
+  assert.deepEqual(queued.nextTasks.map((item) => item.id), [8, 20]);
+  assert.equal(queued.blockedTask, null);
+
+  const allBlocked = deriveSessionMetrics(forecastFixture({ tasks: [
+    task(1, "done", { status: "completed" }),
+    task(2, "done", { status: "completed" }),
+    task(3, "done", { status: "completed" }),
+    task(9, "later blocked", { status: "pending", blockedBy: [99] }),
+    task(7, "first blocked", { status: "pending", blockedBy: [77] }),
+  ], taskTiming: {
+    1: { startedAt: 0, completedAt: 60000 },
+    2: { startedAt: 0, completedAt: 180000 },
+    3: { startedAt: 0, completedAt: 300000 },
+  } }));
+  assert.deepEqual(allBlocked.nextTasks, []);
+  assert.equal(allBlocked.blockedTask.id, 7);
+  assert.equal(allBlocked.planRemainingMs, 360000, "blocked tasks remain planned work in the full-plan forecast");
+
+  const invalidTiming = deriveSessionMetrics(forecastFixture({ taskTiming: {
+    1: { startedAt: 100, completedAt: 50 },
+    2: { startedAt: 0, completedAt: 180000 },
+    3: { startedAt: 0, completedAt: 300000 },
+  } }));
+  assert.equal(invalidTiming.forecastAvailable, false);
+  assert.equal(invalidTiming.medianDurationMs, null);
+  assert.equal(invalidTiming.planCompletionAt, null);
+});
+
+test("renderer selects an exact v2 envelope while degrading malformed timing to a task-only state", async (t) => {
+  const { selectSnapshot, renderSnapshot } = await view();
+  const cwd = await project(t);
+  const canonicalCwd = await realpath(cwd);
+  await writeCandidate(cwd, "valid-v2.json", v2Snapshot("valid-v2", 10, 10, [
+    task(1, "valid timing", { status: "completed" }),
+  ], canonicalCwd, { 1: { startedAt: 0, completedAt: 10 } }));
+  await writeCandidate(cwd, "degraded-v2.json", v2Snapshot("degraded-v2", 20, 20, [
+    task(2, "timing is safely absent", { status: "pending" }),
+  ], canonicalCwd, { 99: { startedAt: 1 } }));
+  await writeCandidate(cwd, "bad-v2.json", v2Snapshot("bad-v2", 30, 30, [
+    task(3, "must not select", { status: "pending" }),
+  ], canonicalCwd, {}, { unexpected: true }));
+
+  const selected = await selectSnapshot(cwd);
+  assert.equal(selected.sessionId, "degraded-v2");
+  assert.deepEqual(selected.taskTiming, {});
+  const frame = renderSnapshot(selected, {
+    now: () => 20,
+    activeSession: { sessionId: "degraded-v2", agentState: "processing" },
+  });
+  assert.match(frame, /timing is safely absent/);
+  assert.match(frame, /(?:Timing unavailable|Collecting samples)/);
+  assert.doesNotMatch(frame, /Estimated/);
+});
+
+test("v2 renderer uses exact active/snapshot status and freshness fallback text", async () => {
+  const { renderSnapshot } = await view();
+  const snapshotValue = forecastFixture({ observedAt: 1000 });
+  const render = (now, activeSession) => renderSnapshot(snapshotValue, { now: () => now, activeSession });
+
+  const running = render(1000, { sessionId: "metrics", agentState: "processing" });
+  assert.match(running, /PI \/ ACTIVE SESSION/);
+  assert.match(running, /RUNNING/);
+  assert.match(running, /UPDATED <1s AGO/);
+  assert.match(running, /Estimated/);
+  assert.match(running, /3 samples/i);
+  assert.match(running, /low/i);
+
+  assert.match(render(2000, { sessionId: "metrics", agentState: "processing" }), /UPDATED 1s AGO/);
+  assert.match(render(11000, { sessionId: "metrics", agentState: "processing" }), /UPDATED 10s AGO/);
+  assert.match(render(12000, { sessionId: "metrics", agentState: "processing" }), /STALE · 11s AGO/);
+
+  const idle = render(1000, { sessionId: "metrics", agentState: "waiting" });
+  assert.match(idle, /PI \/ ACTIVE SESSION/);
+  assert.match(idle, /IDLE/);
+
+  const noMatchingPane = render(1000, { sessionId: "other-session", agentState: "processing" });
+  assert.match(noMatchingPane, /PI \/ SESSION SNAPSHOT/);
+  assert.match(noMatchingPane, /SNAPSHOT/);
+  const cliFailure = render(1000, undefined);
+  assert.match(cliFailure, /PI \/ SESSION SNAPSHOT/);
+  assert.match(cliFailure, /SNAPSHOT/);
+
+  const clockUnknown = render(999, { sessionId: "metrics", agentState: "processing" });
+  assert.match(clockUnknown, /CLOCK UNKNOWN/);
+  assert.doesNotMatch(clockUnknown, /Estimated|Elapsed|ETA/i,
+    "a rollback at display time withholds every forecast/time-progress value");
+});
+
+test("v1 rendering remains header-free and v2 below threshold retains todos without forecast text", async () => {
+  const { renderSnapshot } = await view();
+  const legacy = renderSnapshot(v1Snapshot("legacy", 1, [
+    task(1, "legacy pending"),
+    task(2, "legacy done", { status: "completed" }),
+  ], "/project"));
+  assert.match(legacy, /Pi todos/);
+  assert.match(legacy, /legacy pending/);
+  assert.doesNotMatch(legacy, /PI \/ (?:ACTIVE SESSION|SESSION SNAPSHOT)|Estimated|Collecting samples|Timing unavailable/);
+
+  const collecting = renderSnapshot(completedSampleSnapshot(2), {
+    now: () => 100000,
+    activeSession: { sessionId: "samples", agentState: "processing" },
+  });
+  assert.match(collecting, /PI \/ ACTIVE SESSION/);
+  assert.match(collecting, /Collecting samples/);
+  assert.match(collecting, /sample 1/);
+  assert.doesNotMatch(collecting, /Estimated/);
+});
+
+test("standalone renderer refreshes a v2 forecast frame after a snapshot revision", { timeout: 8000 }, async (t) => {
+  const cwd = await project(t);
+  const sessionId = "live-v2-refresh";
+  const initialSubject = "initial v2 standalone frame";
+  const refreshedSubject = "refreshed v2 standalone frame";
+  const canonicalCwd = await realpath(cwd);
+  const completedTasks = [
+    task(1, "first sample", { status: "completed" }),
+    task(2, "second sample", { status: "completed" }),
+    task(3, "third sample", { status: "completed" }),
+  ];
+  const sampleTiming = {
+    1: { startedAt: 0, completedAt: 60000 },
+    2: { startedAt: 0, completedAt: 180000 },
+    3: { startedAt: 0, completedAt: 300000 },
+  };
+  await writeCandidate(cwd, `${sessionId}.json`, v2Snapshot(sessionId, 100, 300000, [
+    ...completedTasks,
+    task(4, initialSubject),
+  ], canonicalCwd, sampleTiming));
+
+  const child = spawn(process.execPath, [VIEW_PATH, "--instance=contract-v2-test", cwd], {
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  let stdout = "";
+  child.stdout.setEncoding("utf8");
+  child.stdout.on("data", (chunk) => { stdout += chunk; });
+  child.stderr.resume();
+  t.after(() => terminate(child));
+
+  try {
+    await waitForOutput(child, () => stdout, `○ #4 ${initialSubject}`);
+    assert.match(stdout, /PI \/ SESSION SNAPSHOT/);
+    const outputBeforeRevision = stdout.length;
+    await writeCandidate(cwd, `${sessionId}.json`, v2Snapshot(sessionId, 200, 300000, [
+      ...completedTasks,
+      task(4, refreshedSubject, { status: "completed" }),
+    ], canonicalCwd, sampleTiming));
+    await waitForOutput(child, () => stdout.slice(outputBeforeRevision), `✓ #4 ${refreshedSubject}`);
+    assert.match(stdout.slice(outputBeforeRevision), /4 \/ 4 completed/);
+  } finally {
+    await terminate(child);
+  }
 });
