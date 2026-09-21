@@ -127,7 +127,7 @@ None.
 
 ## Implementation Plan
 
-Plan revision: 3
+Plan revision: 4
 Base commit: 6de20574a65897df7ffd19a757394980a4ae9a93
 Requirements SHA256: 840d6c38563f8797e707cb45de1a918227844465eccc0ca8124e90991fd1161a
 Readiness: READY
@@ -136,7 +136,8 @@ Readiness: READY
 
 - Repository: `ijse/pi-otty-todos`
 - Prepared: 2026-09-21 against clean branch `feat/session-progress-forecast`; the base commit is the approved-spec revision above.
-- Supersedes: None.
+- Manual freshness validation: at clean target `28251cf9ed78cc81726fbdff90ba17e11ebbd7a9`, `git diff --quiet 6de20574a65897df7ffd19a757394980a4ae9a93..28251cf9ed78cc81726fbdff90ba17e11ebbd7a9 -- extensions package.json README.md` succeeded. The only intervening files are this canonical specification/plan document; all implementation paths are byte-identical to the base. Before execution, repeat that comparison from the target checkout and block implementation if it differs.
+- Supersedes: Plan revisions 1–3 in this document.
 - Canonical local requirements and plan: this document. No issue tracker is used for this local-only workflow.
 
 ### Repository Evidence
