@@ -1,0 +1,17 @@
+{
+  "name": "pi-otty-todos",
+  "version": "0.1.0",
+  "description": "Live Pi todo lists in an Otty sidebar",
+  "license": "MIT",
+  "type": "module",
+  "keywords": ["pi-package", "pi", "otty", "todos"],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "test": "node --test extensions/tests/*.test.mjs"
+  },
+  "pi": {
+    "extensions": ["./extensions/otty-todos.ts"]
+  }
+}
