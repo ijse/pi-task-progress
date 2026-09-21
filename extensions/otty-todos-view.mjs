@@ -4,135 +4,30 @@ import { execFile as execFileCallback } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { join, resolve } from "node:path";
 import { promisify } from "node:util";
-import { validTaskDetails } from "./otty-todos-core.mjs";
-
-const MAX_BYTES = 256 * 1024;
-const REDRAW = "\x1b[H\x1b[2J";
-const execFile = promisify(execFileCallback);
-const OTTY_CLI = "/Applications/Otty.app/Contents/MacOS/otty-cli";
-
-function isPlainObject(value) {
-  return value !== null && typeof value === "object" && !Array.isArray(value);
-}
-
-async function normalDirectory(path) {
-  try {
-    const stat = await lstat(path);
-    return stat.isDirectory() && !stat.isSymbolicLink();
-  } catch {
-    return false;
-  }
-}
-
-function validSnapshot(value) {
-  if (!isPlainObject(value)) return false;
-  const keys = Object.keys(value).sort();
-  if (keys.join("\0") !== ["cwd", "sessionId", "tasks", "updatedAt", "version"].join("\0")) return false;
-  return value.version === 1
-    && typeof value.sessionId === "string"
-    && typeof value.cwd === "string"
-    && Number.isFinite(value.updatedAt)
-    && validTaskDetails({ action: "list", params: {}, nextId: 0, tasks: value.tasks });
-}
-
+import { deriveSessionMetrics, parseTodoSnapshot } from "./otty-todos-core.mjs";
+const MAX_BYTES = 256 * 1024; const REDRAW = "\x1b[H\x1b[2J"; const execFile = promisify(execFileCallback); const OTTY_CLI = "/Applications/Otty.app/Contents/MacOS/otty-cli";
+async function normalDirectory(path) { try { const stat = await lstat(path); return stat.isDirectory() && !stat.isSymbolicLink(); } catch { return false; } }
 export async function selectSnapshot(projectPath, { activeSessionId } = {}) {
-  let project;
-  try { project = await realpath(resolve(projectPath)); } catch { return null; }
-  const piDir = join(project, ".pi");
-  const store = join(piDir, "otty-todos");
-  if (!(await normalDirectory(piDir)) || !(await normalDirectory(store))) return null;
-
-  let names;
-  try { names = await readdir(store); } catch { return null; }
-  const candidates = [];
-  for (const name of names) {
-    if (!name.endsWith(".json")) continue;
-    const file = join(store, name);
-    try {
-      const stat = await lstat(file);
-      if (!stat.isFile() || stat.isSymbolicLink() || stat.size > MAX_BYTES) continue;
-      const value = JSON.parse(await readFile(file, "utf8"));
-      if (!validSnapshot(value)) continue;
-      candidates.push({ value, mtimeMs: stat.mtimeMs });
-    } catch {}
-  }
-  candidates.sort((a, b) => b.value.updatedAt - a.value.updatedAt
-    || b.mtimeMs - a.mtimeMs
-    || b.value.sessionId.localeCompare(a.value.sessionId));
-  return candidates.find(({ value }) => value.sessionId === activeSessionId)?.value ?? candidates[0]?.value ?? null;
+  let project; try { project = await realpath(resolve(projectPath)); } catch { return null; }
+  const piDir = join(project, ".pi"), store = join(piDir, "otty-todos"); if (!(await normalDirectory(piDir)) || !(await normalDirectory(store))) return null;
+  let names; try { names = await readdir(store); } catch { return null; } const candidates = [];
+  for (const name of names) { if (!name.endsWith(".json")) continue; const file = join(store, name); try { const stat = await lstat(file); if (!stat.isFile() || stat.isSymbolicLink() || stat.size > MAX_BYTES) continue; const value = parseTodoSnapshot(JSON.parse(await readFile(file, "utf8"))); if (!value) continue; candidates.push({ value, mtimeMs: stat.mtimeMs }); } catch {} }
+  candidates.sort((a,b) => b.value.updatedAt-a.value.updatedAt || b.mtimeMs-a.mtimeMs || b.value.sessionId.localeCompare(a.value.sessionId)); return candidates.find(({value}) => value.sessionId === activeSessionId)?.value ?? candidates[0]?.value ?? null;
 }
-
-async function activeOttySession(projectPath) {
-  let project;
-  try {
-    project = await realpath(resolve(projectPath));
-    const { stdout } = await execFile(OTTY_CLI, ["pane", "list", "--json"], {
-      env: process.env,
-      timeout: 1000,
-      maxBuffer: 1024 * 1024,
-    });
-    const panes = JSON.parse(stdout)?.data;
-    if (!Array.isArray(panes)) return undefined;
-    const matches = [];
-    for (const pane of panes) {
-      if (pane?.agent !== "Pi" || typeof pane.agent_session_id !== "string" || !pane.agent_session_id) continue;
-      try {
-        if (await realpath(pane.cwd) === project) matches.push(pane);
-      } catch {}
-    }
-    matches.sort((a, b) => Number(b.agent_state === "processing") - Number(a.agent_state === "processing"));
-    return matches[0]?.agent_session_id;
-  } catch {
-    return undefined;
-  }
+async function activeOttySession(projectPath) { try { const project=await realpath(resolve(projectPath)); const {stdout}=await execFile(OTTY_CLI,["pane","list","--json"],{env:process.env,timeout:1000,maxBuffer:1024*1024}); const panes=JSON.parse(stdout)?.data; if(!Array.isArray(panes)) return undefined; const matches=[]; for(const pane of panes) { if(pane?.agent!=="Pi"||typeof pane.agent_session_id!=="string"||!pane.agent_session_id) continue; try { if(await realpath(pane.cwd)===project) matches.push(pane); } catch {} } matches.sort((a,b)=>Number(b.agent_state==="processing")-Number(a.agent_state==="processing")); const pane=matches[0]; return pane ? {sessionId:pane.agent_session_id,agentState:pane.agent_state}:undefined; } catch { return undefined; } }
+function safeText(value) { return String(value).replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)?/g,"").replace(/\x1b\[[0-?]*[ -/]*[@-~]/g,"").replace(/[\x00-\x1f\x7f-\x9f\u200e\u200f\u202a-\u202e\u2066-\u2069]/g,(c)=>/[\n\r\t]/.test(c)?" ":""); }
+function groups(snapshot) { const visible=snapshot.tasks.filter(t=>t.status!=="deleted"), byId=new Map(visible.map(t=>[t.id,t])); const blocked=t=>t.status==="pending"&&(t.blockedBy??[]).some(id=>byId.get(id)?.status!=="completed"); return [["In progress",visible.filter(t=>t.status==="in_progress")],["Blocked",visible.filter(blocked)],["Pending",visible.filter(t=>t.status==="pending"&&!blocked(t))],["Completed",visible.filter(t=>t.status==="completed")]]; }
+function listLines(snapshot) { const visible=snapshot.tasks.filter(t=>t.status!=="deleted"), complete=visible.filter(t=>t.status==="completed").length; const lines=["Pi todos",`${complete} / ${visible.length} completed`]; for(const [label,tasks] of groups(snapshot)) { if(!tasks.length) continue; lines.push("",label); for(const task of [...tasks].sort((a,b)=>a.id-b.id)) { const marker=task.status==="completed"?"✓":task.status==="in_progress"?"›":label==="Blocked"?"!":"○"; lines.push(`  ${marker} #${task.id} ${safeText(task.subject)}`); } } return lines; }
+function minutes(ms) { return `~${Math.max(1,Math.round(ms/60000))}m`; }
+export function renderSnapshot(snapshot, { now = Date.now, activeSession } = {}) {
+  if (!snapshot || !parseTodoSnapshot(snapshot)) return `${REDRAW}Pi todos\n\nNo Pi todos for this project.`;
+  if (snapshot.version === 1) return REDRAW + listLines(snapshot).join("\n");
+  const age=now()-snapshot.observedAt, matched=activeSession?.sessionId===snapshot.sessionId, state=matched?(activeSession.agentState==="processing"?"RUNNING":"IDLE"):"SNAPSHOT"; const title=matched?"PI / ACTIVE SESSION":"PI / SESSION SNAPSHOT"; const freshness=age<0?"CLOCK UNKNOWN":age<1000?"UPDATED <1s AGO":age<=10000?`UPDATED ${Math.floor(age/1000)}s AGO`:`STALE · ${Math.floor(age/1000)}s AGO`; const metrics=deriveSessionMetrics(snapshot); const lines=[title,`${state} · ${freshness}`];
+  const noTime=age<0; if(!noTime) { lines.push("",`Progress  ${metrics.completedTotal} / ${metrics.visibleTotal} · ${metrics.progressPercent}%`); lines.push(`[${"#".repeat(Math.round(metrics.progressPercent/10))}${"-".repeat(10-Math.round(metrics.progressPercent/10))}]`); }
+  if(metrics.currentTask) { lines.push("",`NOW RUNNING · #${metrics.currentTask.id}`,safeText(metrics.currentTask.subject)); if(!noTime && metrics.forecastAvailable) { lines.push(metrics.currentTaskProgressPercent===null?"Timing unavailable · Estimated from plan average":`Estimated task progress · ${metrics.currentTaskProgressPercent}%`); lines.push(metrics.currentTaskRemainingMs===null?"":`Estimated remaining · ${minutes(metrics.currentTaskRemainingMs)}`); } }
+  if(!noTime && metrics.forecastAvailable) { lines.push("",`Estimated current task · ${metrics.currentTaskRemainingMs===null?minutes(metrics.medianDurationMs):minutes(metrics.currentTaskRemainingMs)}`,`Estimated plan complete · ${minutes(metrics.planRemainingMs)} · ${new Date(metrics.planCompletionAt).toLocaleTimeString([], {hour:"2-digit",minute:"2-digit"})}`,`${metrics.sampleCount} samples · ${metrics.confidence} confidence`); if(metrics.nextTasks.length) { lines.push("","UP NEXT"); for(const task of metrics.nextTasks) lines.push(`  ○ #${task.id} ${safeText(task.subject)} · ${minutes(metrics.medianDurationMs)}`); } else if(metrics.blockedTask) lines.push("","UP NEXT",`  ! #${metrics.blockedTask.id} ${safeText(metrics.blockedTask.subject)} · Blocked`); }
+  else if(!noTime) lines.push("",metrics.sampleCount < 3 ? "Collecting samples" : "Timing unavailable");
+  return REDRAW + lines.concat([""],listLines(snapshot)).join("\n");
 }
-
-function safeText(value) {
-  return String(value)
-    .replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)?/g, "")
-    .replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "")
-    .replace(/[\x00-\x1f\x7f-\x9f\u200e\u200f\u202a-\u202e\u2066-\u2069]/g, (char) => /[\n\r\t]/.test(char) ? " " : "");
-}
-
-export function renderSnapshot(snapshot) {
-  if (!snapshot || !validSnapshot(snapshot)) return `${REDRAW}Pi todos\n\nNo Pi todos for this project.`;
-  const visible = snapshot.tasks.filter((task) => task.status !== "deleted");
-  const complete = visible.filter((task) => task.status === "completed").length;
-  const tasksById = new Map(visible.map((task) => [task.id, task]));
-  const blocked = (task) => task.status === "pending" && (task.blockedBy ?? []).some((id) => tasksById.get(id)?.status !== "completed");
-  const groups = [
-    ["In progress", visible.filter((task) => task.status === "in_progress")],
-    ["Blocked", visible.filter(blocked)],
-    ["Pending", visible.filter((task) => task.status === "pending" && !blocked(task))],
-    ["Completed", visible.filter((task) => task.status === "completed")],
-  ];
-  const lines = ["Pi todos", `${complete} / ${visible.length} completed`];
-  for (const [label, tasks] of groups) {
-    if (!tasks.length) continue;
-    lines.push("", label);
-    for (const task of [...tasks].sort((a, b) => a.id - b.id)) {
-      const marker = task.status === "completed" ? "✓" : task.status === "in_progress" ? "›" : task.status === "pending" && blocked(task) ? "!" : "○";
-      lines.push(`  ${marker} #${task.id} ${safeText(task.subject)}`);
-    }
-  }
-  return REDRAW + lines.join("\n");
-}
-
-async function main() {
-  // Otty reuses a View process when its command and cwd match. A harmless
-  // instance token changes the command so a config reload can launch a fresh
-  // renderer without being mistaken for a project path.
-  const project = process.argv.slice(2).find((arg) => !arg.startsWith("--instance=")) ?? process.cwd();
-  const draw = async () => {
-    const activeSessionId = await activeOttySession(project);
-    process.stdout.write(renderSnapshot(await selectSnapshot(project, { activeSessionId })));
-  };
-  await draw();
-  // Keep the terminal program alive: Otty needs subsequent redraws as the
-  // snapshot changes. Do not unref this timer or Node exits after frame one.
-  setInterval(() => { void draw(); }, 750);
-}
-
-if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  void main();
-}
+async function main() { const project=process.argv.slice(2).find(arg=>!arg.startsWith("--instance="))??process.cwd(); const draw=async()=>{const activeSession=await activeOttySession(project); process.stdout.write(renderSnapshot(await selectSnapshot(project,{activeSessionId:activeSession?.sessionId}),{activeSession}));}; await draw(); setInterval(()=>{void draw();},750); }
+if(process.argv[1]&&resolve(process.argv[1])===fileURLToPath(import.meta.url)) void main();
