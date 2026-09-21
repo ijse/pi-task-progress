@@ -41,12 +41,12 @@ The publisher keeps an in-memory timing map per canonical project/session regist
 | Transition | Action |
 | --- | --- |
 | first seen as `in_progress` | Set `startedAt` to the live observation time if absent. |
-| non-completed → `completed` | Set `completedAt` to the live observation time. Do not synthesize a missing `startedAt`. |
+| non-completed → `completed` | Set `completedAt` to the live observation time only if it is not before any retained `startedAt`. Do not synthesize a missing `startedAt`; on a clock rollback, remove the task timing record instead. |
 | `completed` → non-completed | Remove `completedAt`; retain `startedAt` only if the task is still in progress, otherwise remove its timing. |
 | any status → `deleted`, or task disappears | Remove timing. |
 | `in_progress` → `pending` | Remove timing; a later restart gets a new start. |
 
-On startup and hot reload, the publisher first restores the selected session's valid v2 timing map from its existing snapshot. Branch replay then scans ordered historical todo results only when each relevant result has a finite epoch-millisecond event timestamp. It uses those historical timestamps for transitions and never calls `now()` for replay. If any required transition timestamp is absent or invalid, the affected task receives no reconstructed timing; a later live transition begins a new observation. This avoids fabricated duration samples.
+On startup and hot reload, the publisher first restores the selected session's valid v2 timing map from its existing snapshot. Branch replay reads the ISO-8601 `timestamp` field on each session-tree `entry` that contains a todo tool-result (`Date.parse(entry.timestamp)`). It scans transitions only while that parse result is finite and non-negative, uses that historical epoch-millisecond value for transitions, and never calls `now()` for replay. If a required entry timestamp is absent, invalid, or precedes a retained start time, the affected task receives no reconstructed timing; a later live transition begins a new observation. This avoids fabricated or negative duration samples.
 
 All existing per-session revision ordering rules apply. A queued write carries the reconciled timing and cannot overwrite a newer observation.
 
@@ -83,7 +83,7 @@ The terminal renderer uses plain text and existing ANSI redraw controls only. It
 
 - Existing v1 consumers remain readable. They never receive fabricated timing or ETA.
 - Invalid v2 timing data invalidates that snapshot rather than falling back to unsafe partial data.
-- System-clock rollback is handled by ignoring negative elapsed intervals and withholding affected samples.
+- System-clock rollback is handled by clearing the affected task's timing record (without changing its todo status), ignoring negative elapsed intervals, and withholding affected samples.
 - The current path canonicalization, trusted-project gate, directory/file symlink rejection, size cap, permission mode, atomic write, and active-session selection behavior are unchanged.
 - The Otty renderer continues refreshing every 750 ms, but it treats the persisted `observedAt` as the forecast reference: time does not advance in a stale snapshot merely because the display redraws.
 
